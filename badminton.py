@@ -1,94 +1,68 @@
-import streamlit as st
-import cv2
-import mediapipe as mp
-import tempfile
-import numpy as np
-from scipy.spatial.distance import euclidean
+import os
+import parse
+import shutil
 
-# Initialize Mediapipe Pose
-mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
-pose = mp_pose.Pose()
+from dataset import data_dir
+from utils.general import list_dirs, generate_data_frames, get_num_frames, get_match_median
+from utils.visualize import plot_median_files
 
-# Function to extract pose landmarks from a video
-def extract_landmarks(video_path):
-    cap = cv2.VideoCapture(video_path)
-    landmarks_list = []
 
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
+# Replace csv to corrected csv in test set
+if os.path.exists('corrected_test_label'):
+    match_dirs = list_dirs(os.path.join(data_dir, 'test'))
+    match_dirs = sorted(match_dirs, key=lambda s: int(s.split('match')[-1]))
+    for match_dir in match_dirs:
+        file_format_str = os.path.join('{}', 'test', '{}')
+        _, match_dir = parse.parse(file_format_str, match_dir)
+        if not os.path.exists(os.path.join(data_dir, 'test', match_dir, 'corrected_csv')):
+            shutil.copytree(os.path.join('corrected_test_label', match_dir, 'corrected_csv'),
+                            os.path.join(data_dir, 'test', match_dir, 'corrected_csv'))
 
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        result = pose.process(frame_rgb)
+# Generate frames from videos
+for split in ['train', 'test']:
+    split_frame_count = 0
+    match_dirs = list_dirs(os.path.join(data_dir, split))
+    for match_dir in match_dirs:
+        match_frame_count = 0
+        file_format_str = os.path.join('{}', 'match{}')
+        _, match_id = parse.parse(file_format_str, match_dir)
+        video_files = list_dirs(os.path.join(match_dir, 'video'))
+        for video_file in video_files:
+            generate_data_frames(video_file)
+            file_format_str = os.path.join('{}', 'video', '{}.mp4')
+            _, video_name = parse.parse(file_format_str, video_file)
+            rally_dir = os.path.join(match_dir, 'frame', video_name)
+            video_frame_count = get_num_frames(rally_dir)
+            print(f'[{split} / match{match_id} / {video_name}]\tvideo frames: 
+            {video_frame_count}')
+            match_frame_count += video_frame_count
+        get_match_median(match_dir)
+        print(f'[{split} / match{match_id}]:\ttotal frames: {match_frame_count}')
+        split_frame_count += match_frame_count
+    
+    print(f'[{split}]:\ttotal frames: {split_frame_count}')
 
-        if result.pose_landmarks:
-            landmarks = [(lmk.x, lmk.y, lmk.z) for lmk in result.pose_landmarks.landmark]
-            landmarks_list.append(landmarks)
+# Form validation set
+if not os.path.exists(os.path.join(data_dir, 'val')):
+    match_dirs = list_dirs(os.path.join(data_dir, 'train'))
+    match_dirs = sorted(match_dirs, key=lambda s: int(s.split('match')[-1]))
+    for match_dir in match_dirs:
+        # Pick last rally in each match as validation set
+        video_files = list_dirs(os.path.join(match_dir, 'video'))
+        file_format_str = os.path.join('{}', 'train', '{}', 'video','{}.mp4')
+        _, match_dir, rally_id = parse.parse(file_format_str, video_files[-1]) 
+        os.makedirs(os.path.join(data_dir, 'val', match_dir, 'csv'), exist_ok=True)
+        os.makedirs(os.path.join(data_dir, 'val', match_dir, 'video'), exist_ok=True)
+        shutil.move(os.path.join(data_dir, 'train', match_dir, 'csv', f'{rally_id}_ball.csv'),
+                    os.path.join(data_dir, 'val', match_dir, 'csv', f'{rally_id}_ball.csv'))
+        shutil.move(os.path.join(data_dir, 'train', match_dir, 'video', f'{rally_id}.mp4'),
+                    os.path.join(data_dir, 'val', match_dir, 'video', f'{rally_id}.mp4'))
+        shutil.move(os.path.join(data_dir, 'train', match_dir, 'frame', rally_id),
+                    os.path.join(data_dir, 'val', match_dir, 'frame', rally_id))
+        shutil.copy(os.path.join(data_dir, 'train', match_dir, 'median.npz'),
+                    os.path.join(data_dir, 'val', match_dir, 'median.npz'))
 
-    cap.release()
-    return landmarks_list
+# Plot median frames, save at <data_dir>/median
+plot_median_files(data_dir)
 
-# Function to calculate similarity between two sets of landmarks
-def calculate_similarity(reference_landmarks, test_landmarks):
-    if len(reference_landmarks) != len(test_landmarks):
-        min_length = min(len(reference_landmarks), len(test_landmarks))
-        reference_landmarks = reference_landmarks[:min_length]
-        test_landmarks = test_landmarks[:min_length]
-
-    similarity_scores = []
-
-    for ref_frame, test_frame in zip(reference_landmarks, test_landmarks):
-        frame_similarity = []
-        for ref_point, test_point in zip(ref_frame, test_frame):
-            distance = euclidean(ref_point, test_point)
-            frame_similarity.append(distance)
-        avg_similarity = np.mean(frame_similarity)
-        similarity_scores.append(avg_similarity)
-
-    # Normalize the similarity score to a percentage (lower is better)
-    max_possible_distance = 1  # Normalized landmark positions range from 0 to 1
-    similarity_percentage = 100 - (np.mean(similarity_scores) / max_possible_distance * 100)
-    return similarity_percentage
-
-# Streamlit Web App
-st.title("Badminton Technique Analyzer")
-st.write("Upload a reference video (perfect smash) and your video to compare.")
-
-# Step 1: Upload Reference Video
-st.header("Step 1: Upload Perfect Smash Video")
-reference_video = st.file_uploader("Upload the perfect smash video", type=["mp4", "mov", "avi"], key="reference")
-
-if reference_video:
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(reference_video.read())
-        reference_video_path = temp_file.name
-
-    st.video(reference_video)
-    st.write("Processing the perfect smash video...")
-    reference_landmarks = extract_landmarks(reference_video_path)
-    st.write("Perfect smash video processed!")
-
-# Step 2: Upload User Video
-st.header("Step 2: Upload Your Smash Video")
-uploaded_video = st.file_uploader("Upload your smash video", type=["mp4", "mov", "avi"], key="uploaded")
-
-if uploaded_video and reference_video:
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(uploaded_video.read())
-        uploaded_video_path = temp_file.name
-
-    st.video(uploaded_video)
-    st.write("Processing your video...")
-    uploaded_landmarks = extract_landmarks(uploaded_video_path)
-
-    # Step 3: Compare Landmarks
-    st.write("Comparing your video with the perfect smash video...")
-    similarity_score = calculate_similarity(reference_landmarks, uploaded_landmarks)
-    st.write(f"Similarity Score: {similarity_score:.2f}%")
-
-    if similarity_score > 90:
-        st.success("Great job! Your smash is very similar to the perfect smash.")
-    else:
-        st.warning("Your smash could use some improvement. Check your posture and technique.")
+print('Done.')
