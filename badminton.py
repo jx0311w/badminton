@@ -3,31 +3,17 @@ import cv2
 import mediapipe as mp
 import tempfile
 import numpy as np
+from scipy.spatial.distance import euclidean
 
 # Initialize Mediapipe Pose
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 pose = mp_pose.Pose()
 
-# Define function to analyze pose
-def analyze_pose(landmarks):
-    feedback = []
-    # Example rule: Check arm angle for a smash
-    if landmarks and len(landmarks) > 0:
-        # Example: Check wrist and elbow position
-        # Add your own detailed analysis logic here
-        wrist = landmarks[mp_pose.PoseLandmark.LEFT_WRIST.value]
-        elbow = landmarks[mp_pose.PoseLandmark.LEFT_ELBOW.value]
-        if wrist.y > elbow.y:
-            feedback.append("Lower your wrist for a stronger smash.")
-        else:
-            feedback.append("Good wrist position for smash.")
-    return feedback
-
-# Define function to process video
-def process_video(file_path):
-    cap = cv2.VideoCapture(file_path)
-    feedback_list = []
+# Function to extract pose landmarks from a video
+def extract_landmarks(video_path):
+    cap = cv2.VideoCapture(video_path)
+    landmarks_list = []
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -38,32 +24,71 @@ def process_video(file_path):
         result = pose.process(frame_rgb)
 
         if result.pose_landmarks:
-            feedback = analyze_pose(result.pose_landmarks.landmark)
-            feedback_list.extend(feedback)
-
-            mp_drawing.draw_landmarks(
-                frame, result.pose_landmarks, mp_pose.POSE_CONNECTIONS
-            )
+            landmarks = [(lmk.x, lmk.y, lmk.z) for lmk in result.pose_landmarks.landmark]
+            landmarks_list.append(landmarks)
 
     cap.release()
-    return feedback_list
+    return landmarks_list
+
+# Function to calculate similarity between two sets of landmarks
+def calculate_similarity(reference_landmarks, test_landmarks):
+    if len(reference_landmarks) != len(test_landmarks):
+        min_length = min(len(reference_landmarks), len(test_landmarks))
+        reference_landmarks = reference_landmarks[:min_length]
+        test_landmarks = test_landmarks[:min_length]
+
+    similarity_scores = []
+
+    for ref_frame, test_frame in zip(reference_landmarks, test_landmarks):
+        frame_similarity = []
+        for ref_point, test_point in zip(ref_frame, test_frame):
+            distance = euclidean(ref_point, test_point)
+            frame_similarity.append(distance)
+        avg_similarity = np.mean(frame_similarity)
+        similarity_scores.append(avg_similarity)
+
+    # Normalize the similarity score to a percentage (lower is better)
+    max_possible_distance = 1  # Normalized landmark positions range from 0 to 1
+    similarity_percentage = 100 - (np.mean(similarity_scores) / max_possible_distance * 100)
+    return similarity_percentage
 
 # Streamlit Web App
 st.title("Badminton Technique Analyzer")
-st.write("Upload a video (smash, push, serve) to analyze your technique.")
+st.write("Upload a reference video (perfect smash) and your video to compare.")
 
-uploaded_file = st.file_uploader("Upload your video", type=["mp4", "mov", "avi"])
+# Step 1: Upload Reference Video
+st.header("Step 1: Upload Perfect Smash Video")
+reference_video = st.file_uploader("Upload the perfect smash video", type=["mp4", "mov", "avi"], key="reference")
 
-if uploaded_file is not None:
+if reference_video:
     with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(uploaded_file.read())
-        video_path = temp_file.name
+        temp_file.write(reference_video.read())
+        reference_video_path = temp_file.name
 
-    st.video(uploaded_file)
+    st.video(reference_video)
+    st.write("Processing the perfect smash video...")
+    reference_landmarks = extract_landmarks(reference_video_path)
+    st.write("Perfect smash video processed!")
 
-    st.write("Processing video...")
-    feedback = process_video(video_path)
+# Step 2: Upload User Video
+st.header("Step 2: Upload Your Smash Video")
+uploaded_video = st.file_uploader("Upload your smash video", type=["mp4", "mov", "avi"], key="uploaded")
 
-    st.write("Analysis Complete:")
-    for point in feedback:
-        st.write(f"- {point}")
+if uploaded_video and reference_video:
+    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
+        temp_file.write(uploaded_video.read())
+        uploaded_video_path = temp_file.name
+
+    st.video(uploaded_video)
+    st.write("Processing your video...")
+    uploaded_landmarks = extract_landmarks(uploaded_video_path)
+
+    # Step 3: Compare Landmarks
+    st.write("Comparing your video with the perfect smash video...")
+    similarity_score = calculate_similarity(reference_landmarks, uploaded_landmarks)
+    st.write(f"Similarity Score: {similarity_score:.2f}%")
+
+    if similarity_score > 90:
+        st.success("Great job! Your smash is very similar to the perfect smash.")
+    else:
+        st.warning("Your smash could use some improvement. Check your posture and technique.")
